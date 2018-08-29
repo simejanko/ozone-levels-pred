@@ -1,0 +1,257 @@
+\documentclass[11pt]{article}
+
+
+\usepackage{parskip}
+\usepackage{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage[makeroom]{cancel}
+\usepackage{titling}
+
+
+\geometry{
+  a4paper,
+  bottom=1.1in,
+  right=1.25in,
+  left=1.25in,
+  top=1.25in,
+}
+
+\pagenumbering{gobble}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE,echo=F,include=FALSE}
+
+\title{Predicting ozone levels}
+\author{Simon Janežič}
+\date{}
+\maketitle
+
+\section*{Introduction}
+Our goal was to build a Bayesian model for predicting ozone levels of seven weather stations located in Slovenia at 8 o'clock. We have about five years worth of data for all stations. Each data point includes many relevant features like past ozone measurements, meteorological measurements (e.g. temperature, wind) and meteorological predictions from an existing model (ECMWF).
+
+\section*{Data preprocessing}
+
+We have removed date from features and replaced day of the year feature with cosine transformation of it that indicates seasonality.
+
+%cos(((df[,"dayofyear_0_danes"] - 1) *2*pi)/364 - ((2*pi)/12))
+$seasonal\_feature = \cos{(\frac{(day\_of\_year - 1) 2\pi}{364} - \frac{2\pi}{12})}$
+
+<<label=FIG0,fig=T,height=2,width=4>>=
+  library(ggplot2)
+  day_of_year = seq(1,365)
+  transformed_doy <- cos(((day_of_year - 1) *2*pi)/364 - ((2*pi)/12))
+  months <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct" ,"Nov", "Dec")
+  ggplot() + geom_line(aes(x=day_of_year, y=transformed_doy)) + scale_x_continuous(labels= months, breaks=c(1,32,60,91,121,152,182,213,243,274,304,335)) + xlab("day of year") + ylab("seasonal feature")
+@
+
+\begin{figure}[h]
+\centering
+\includegraphics[width = 0.6\linewidth]{sem-FIG0}
+\caption{Day of the year feature to seasonal feature transformation. Ticks on x-axis indicate beginning of the months.}
+\label{fig1}
+\end{figure}
+
+In Figure \ref{fig1} we can see that the coldest months (January and Febraury) have transformed values of around 1, while the hottest months (July and August) have transformed values of around -1. 
+
+As final data preprocessing steps we removed features with zero variance and standardized features that were left. We also removed samples with unknown attribute values.
+
+\newpage
+\section*{Model comparison}
+
+We have tested four different linear bayesian models:
+\begin{itemize}
+  \item \textbf{linear regression (LR)} - basic linear regression (one model per station).
+  \item \textbf{lasso regression (L1)} - L1 regularized linear regression with a hyperprior on regularization  parameter (one model per station).
+  \item \textbf{gamma regression (GR)} - L1 regularized gamma regression with a log link function and hyperprior on regularization  parameter. The motivation for using gamma regression is the fact that the domain of our target variable is positive (one model per station). 
+  \item \textbf{joint lasso regression (JL1)} - L1 regularized linear regression with a hyperprior on regularization parameter. Uses data from all stations to predict ozone levels of every station. We have achieved that by simply adding a station identifier attribute, which is broken into 6 binary attributes (7 stations).
+\end{itemize}
+To evaluate our models we used data from the most recent year of every station as a test set. Log likelihood was used as a metric.
+
+
+<<label=FIG1,fig=T,height=2,width=4>>=
+setwd("C:/Users/sime/Google Drive/faks/BS/sem")
+library(rstan)
+library(abind)
+library(data.table)
+library(mcmcse)
+
+locations <- c("Celje","Iskrba","Koper","Krvavec","Ljubljana","Murska Sobota","Nova Gorica")
+lr_smp = list()
+l1_smp = list()
+gr_smp = list()
+
+lr_log_lik = list()
+l1_log_lik = list()
+gr_log_lik = list()
+
+lr_log_lik_train = list()
+l1_log_lik_train = list()
+gr_log_lik_train = list()
+
+
+for(i in 1:length(locations)){
+  location <- locations[i]
+  
+  lr_smp[[location]] = readRDS(sprintf("stan_fit_no_reg_%s.rds", location))
+  l1_smp[[location]] = readRDS(sprintf("stan_fit_%s.rds", location))
+  gr_smp[[location]] = readRDS(sprintf("stan_fit_gamma_%s.rds", location))
+  
+  lr_log_lik[[i]] =  drop(extract(lr_smp[[location]], pars="log_lik_test", permute=F))
+  l1_log_lik[[i]] =  drop(extract(l1_smp[[location]], pars="log_lik_test", permute=F))
+  gr_log_lik[[i]] =  drop(extract(gr_smp[[location]], pars="log_lik_test", permute=F))
+  
+}
+
+jl1_smp = readRDS("stan_fit_all.rds")
+jl1_log_lik = drop(extract(jl1_smp, pars="log_lik_test", permute=F))
+
+lr_log_lik_all = rowSums(do.call(cbind, lr_log_lik))
+l1_log_lik_all = rowSums(do.call(cbind, l1_log_lik))
+gr_log_lik_all = rowSums(do.call(cbind, gr_log_lik))
+jl1_log_lik_all = rowSums(jl1_log_lik)
+
+
+tmp <- data.frame(x=c("LR", "L1", "GR", "JL1"),y=c(mean(lr_log_lik_all), mean(l1_log_lik_all), mean(gr_log_lik_all), mean(jl1_log_lik_all)),
+                  ymin=c(quantile(lr_log_lik_all, 0.05),quantile(l1_log_lik_all, 0.05),quantile(gr_log_lik_all, 0.05),quantile(jl1_log_lik_all, 0.05)), 
+                  ymax=c(quantile(lr_log_lik_all, 0.95),quantile(l1_log_lik_all, 0.95),quantile(gr_log_lik_all, 0.95),quantile(jl1_log_lik_all, 0.95)))
+
+
+ggplot(tmp, aes(x,y, ymin=ymin, ymax=ymax))+ geom_linerange(colour="blue", size=1) + geom_point(size=3, colour="blue") + ylab("test set log likelihood (90% CI)") + xlab("models") + coord_flip()
+@
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width = 0.6\linewidth]{sem-FIG1}
+\end{center}
+\caption{Model comparison. Dots represent expected values and lines represent 90\% CI.}
+\label{fig2}
+\end{figure}
+
+In Figure \ref{fig2} we can see that LR seems to perform the worst. It might be overfitting since adding regularization (L1) gives us model with visually the best score. The fact that JL1 model has lower expected score than L1 means that the effects of meteorological attributes might not be independent from station's location and simply encoding station as a discrete attribute is not enough to make up for that. Since the two models are visually fairly close we also estimate the probability that L1 model has higher test set log likelihood: $P(L_t(L1) > L_t(JL1)) \approx
+<<results=tex>>=
+est = mcse(l1_log_lik_all > jl1_log_lik_all)
+cat(sprintf("%.3f \\pm %.3f", est$est, est$se))
+@
+$. This reaffirms our belief in L1 as the strongest model. Gamma regression's expected log likelihood is noticeably lower than the two best models, indicating that gamma distribution is not the right choice for predicting ozone levels. 
+
+\newpage
+\section*{Comparing performance on stations}
+For this part of the analysis, we take our best model (L1) and try to answer if and how it's performance changes from station to station. Log scores had to be normalized due to small differences in number of samples between the stations. 
+
+<<label=FIG2,fig=T,height=3,width=5>>=
+l1_log_lik_sum <- do.call(cbind, lapply(l1_log_lik, rowMeans))
+
+tmp1 <- data.frame(y=colMeans(l1_log_lik_sum), x=locations, ymin=apply(l1_log_lik_sum, 2, quantile, 0.05), ymax=apply(l1_log_lik_sum, 2, quantile, 0.95))
+#tmp2 <- data.frame(x=lr_loo[,1], y=locations, xmin=lr_loo[,1]-lr_loo[,2], xmax=lr_loo[,1]+lr_loo[,2])
+
+ggplot(tmp1, aes(x,y, ymin=ymin, ymax=ymax)) + geom_point(colour="blue", size=3) + geom_linerange(colour="blue", size=1)+ xlab("station") + ylab("normalized test set log likelihood (90% CI)") + coord_flip()
+#  + geom_point(aes(x, y),data=tmp2)+ geom_errorbarh(aes(x,y, xmin=xmin, xmax=xmax), data=tmp2, colour="blue", height=0.3)
+@
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width = 0.7\linewidth]{sem-FIG2}
+\end{center}
+\caption{L1 performance on different stations. Dots represent expected values and lines represent 90\% CI.}
+\label{fig3}
+\end{figure}
+
+In Figure \ref{fig3} we can spot some differences between the stations. Most noticeably Krvavec seems to be easiest to predict. Krvavec also has by far the highest altitude (1740m) and is not a city. Next outlier would be Iskrba, which also has relatively high altitude (540m) and is not a city. All the other stations are located in cities which have low altitude and most of them have comparable performance, indicating that ozone levels in cities are more unpredictable (with current features). One exception would be Koper that is somewhat easier to predict, but since this is a city by the sea it might be a special case.
+
+\section*{Model explanation}
+In this section we try to find and explain the most important features when it comes to predicting ozone levels. We use our best model (L1).
+
+<<label=FIG3,fig=T,height=3,width=4>>=
+data <- readRDS("all.rds")
+correlations = cor(data)
+diag(correlations) = NA
+correlations = as.vector(correlations)
+correlations = correlations[!is.na(correlations)]
+
+ggplot() + geom_histogram(aes(x=correlations), bins=20) + xlab("Pearson correlation coefficient")
+
+#remove highly correlated features
+#correlations = cor(data)
+#correlations[upper.tri(correlations)] <- 0
+#diag(correlations) <- 0
+#data.new <- data[,!apply(correlations,2,function(x) any(x > 0.8) | any(x < -0.8))]
+@
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width = 0.6\linewidth]{sem-FIG3}
+\end{center}
+\caption{Attribute pairs Pearson correlation histogram. Correlations of variables to themselves are not included in the histogram.}
+\label{fig4}
+\end{figure}
+
+Finding most important features reliably is a challenging task since a lot of the feature pairs are very highly correlated (Figure \ref{fig4}). However, we cannot ignore the fact that we used L1 regularization on our model. This means that highly correlated features are a lot less likely to obtain large weights that effectively cancel each other out for minor performance improvements, since our Laplace prior will outweigh that. That is, if our regularization parameter (Laplace distribution scale) is strict enough. 
+
+We can estimate regularization parameter's expected value for every station: 
+$ E[\lambda] \approx
+<<results=tex>>=
+estimates = ""
+for(i in 1:length(locations)){
+  location = locations[i]
+  est = mcse(extract(l1_smp[[i]], pars="lambda", permute=F))
+  estimates = paste(estimates, ',' ,sprintf("%.2f \\pm %.2f", est$est, est$se), collapse='')
+}
+
+cat(sprintf("\\lbrack %s \\rbrack", substr(estimates,3,nchar(estimates))))
+@
+$.
+All features are standardized, 90\% sample CI for target variable is $(28.0, 142.6)$ and expected values for all lambda parameters are below 1. From this relatively large scale difference we can intuitively say that regularization is quite strict. 
+
+<<label=FIG4,fig=T,height=4,width=4>>=
+betas <- lapply(lapply(l1_smp, extract, pars="beta", permute=F), drop)
+for(i in 1:length(betas)){
+  betas[[i]] = data.frame(betas[[i]])
+  colnames(betas[[i]]) =  readRDS(sprintf("attribute_names_%s.rds", locations[[i]]))
+}
+
+betas <- lapply(as.list(abs(rbindlist(betas, use.names=T, fill=T))), na.omit)
+betas_est <- do.call(cbind, lapply(betas, mcse))
+
+ord <-  order(unlist(betas_est[1,]), decreasing=T)
+betas_se <- unlist(betas_est[2,ord])
+betas_est <- unlist(betas_est[1,ord])
+
+ggplot() + geom_col(aes(x=seq(1:50), y=betas_est[1:50]),fill="blue", colour="blue", size=0.5) + xlab("attributes") + ylab("expected absolute weight")
+@
+
+\newpage
+
+To find most important features we calculated expected absolute weight values for every feature and sorted features in descending order. We used MCMC samples from all stations to achieve that, since we wish to find attributes that are important for all stations. Figure \ref{fig5} displays the results. We notice that only a few of the attributes stand out with high expected importance. After those attributes the importance starts falling very slowly.
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width = 0.6\linewidth]{sem-FIG4}
+\end{center}
+\caption{Expected importance of top 50 attributes.}
+\label{fig5}
+\end{figure}
+
+\newpage
+\begin{table}[h]
+ \caption{Six attributes with highest expected importance.}
+ \label{tbl1}
+\centering
+ \begin{tabular}{l | c} 
+ \textbf{Attribute} & \textbf{Expected absolute weight}\\
+ \hline
+ max. $O_3$ yesterday & $9.41 \pm 0.47$\\
+ max. $O_3$ till 7h & $6.20 \pm 0.47$\\
+ temp. difference (2m and 950 hPa) till 7h today & $2.36 \pm 0.21$\\
+ max. global radiation till 7h& $2.02 \pm 0.13$\\
+ max. temp. till 7h &  $1.55 \pm 0.22$\\
+ seasonal feature &  $1.40 \pm 0.11$\\
+ \end{tabular}
+\end{table}
+
+Those few important features that stand out are listed in Table \ref{tbl1}. Two features with by far the highest expected importance have to do with ozone levels from the past. It is no surprise that ozone levels from the near past strongly affect future ozone levels. Perhaps it is more interesting that maximum values are deemed more important than the means. The importance of temperature features is no surprise either, since temperature and ozone are closely related. More ozone means more heat from the UV waves gets trapped in the stratosphere. At the same time ozone absorbs infrared radiation from the earth's surface which heats up the troposphere. Of course global radiation plays a big part in the very same process, as does the seasonality (more sun during summer, more pollution during winter).
+
+\section*{Conclusion}
+We've shown that basic linear regression can be significantly improved with L1 regularization when predicting ozone levels from the given dataset. We also noticed that ozone levels are easier to predict for certain stations and found a potential link with the station altitude and a station being in a city or in a rural area. Finally, we found a reasonable explanations for the few most important attributes whose expected absolute weight values stood out.   
+
+\end{document}
